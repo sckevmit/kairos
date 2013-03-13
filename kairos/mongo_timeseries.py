@@ -106,13 +106,17 @@ class Timeseries(object):
       # Define the indices for lookups and TTLs
       # TODO: the interval+(resolution+)name combination should be unique,
       # but should the index be defined as such? Consider performance vs.
-      # correctness tradeoff
+      # correctness tradeoff. Also will need to determine if we need to 
+      # maintain this multikey index or if there's a better way to implement
+      # all the features. Lastly, determine if it's better to add 'value'
+      # to the index and spec the fields in get() and series() so that we
+      # get covered indices.
       if config['coarse']:
         self._client[interval].ensure_index( 
           [('interval',DESCENDING),('name',ASCENDING)], background=True )
       else:
         self._client[interval].ensure_index( 
-          [('interval',DESCENDING),('resolution',DESCENDING),('name',ASCENDING)],
+          [('interval',DESCENDING),('resolution',ASCENDING),('name',ASCENDING)],
           background=True )
       if expire:
         self._client[interval].ensure_index( 
@@ -148,16 +152,12 @@ class Timeseries(object):
     # For now, choosing to go with matching on the tuple until performance 
     # testing can be done. Even then, there may be a variety of factors which
     # make the results situation-dependent.
+    # TODO: confirm that this is in fact using the indices correctly.
     for interval,config in self._intervals.iteritems():
       i_bucket, r_bucket, i_key, r_key = config['calc_keys'](name, timestamp)
 
       insert = {'name':name, 'interval':i_bucket}
-      #if config['coarse']:
-        ##_id = insert['_id'] = i_key
-        #pass
-      #else:
       if not config['coarse']:
-        #_id = insert['_id'] = r_key
         insert['resolution'] = r_bucket
       query = insert.copy()
 
@@ -168,10 +168,7 @@ class Timeseries(object):
       insert = {'$set':insert.copy()}
       self._insert( insert, value )
       
-
       # TODO: use write preference settings if we have them
-      # TODO: turn this into one call if possible. when using atomic operators,
-      # either check_keys
       self._client[interval].update( query, insert, upsert=True, check_keys=False )
 
   def delete(self, name):
@@ -188,7 +185,49 @@ class Timeseries(object):
     return num_deleted
   
   def get(self, name, interval, timestamp=None, condensed=False, transform=None):
-    return None
+    '''
+    Get ze data
+    '''
+    if not timestamp:
+      timestamp = time.time()
+
+    config = self._intervals.get(interval)
+    if not config:
+      raise UnknownInterval(interval)
+    i_bucket, r_bucket, i_key, r_key = config['calc_keys'](name, timestamp)
+    
+    rval = OrderedDict()    
+    query = {'name':name, 'interval':i_bucket}
+    if config['coarse']:
+      record = self._client[interval].find_one( query )
+      if record:
+        data = self._process_row( record['value'] )
+        rval[ i_bucket*config['step'] ] = data
+      else:
+        # TODO: Using same functional tests from redis, this is the expectation.
+        # Not sure it's the right assumption though, None seems like the more
+        # appropriate value, in which case the key could not be set at all and
+        # caller can assume to use get() on the return value.
+        rval[ i_bucket*config['step'] ] = []
+    else:
+      # TODO: this likely needs some optimization, either to force the query 
+      # plan, add a range for the resolution condition, or something along
+      # those lines.
+      sort = [('interval', DESCENDING), ('resolution', ASCENDING) ]
+      cursor = self._client[interval].find( spec=query, sort=sort )
+
+      idx = 0
+      for record in cursor:
+        rval[ record['resolution']*config['resolution'] ] = record['value']
+
+    # If condensed, collapse the result into a single row
+    if condensed and not config['coarse']:
+      rval = { i_bucket*config['step'] : self._condense(rval) }
+    if transform:
+      for k,v in rval.iteritems():
+        rval[k] = self._transform(v, transform)
+    
+    return rval
 
   def _transform(self, data, transform):
     '''
@@ -204,11 +243,11 @@ class Timeseries(object):
     '''
     #raise NotImplementedError()
     # series type
-    #spec['$push'] = {'value':value}
+    spec['$push'] = {'value':value}
     # count type
     #spec['$inc'] = {'value':value}
     # histogram type
-    spec['$inc'] = {'value.%s'%(value): 1}
+    # spec['$inc'] = {'value.%s'%(value): 1}
     # gauge type
     #spec['$set']['value'] = value
     
@@ -224,7 +263,19 @@ class Timeseries(object):
     Subclasses should apply any read function to the data. Will only be called
     if there is one.
     '''
-    raise NotImplementedError()
+    #raise NotImplementedError()
+    # series type
+    if self._read_func:
+      return map(self._read_func, data)
+    return data
+    # histogram type
+    #if not data:
+      #return {}
+    #rval = {}
+    #for value,count in data.iteritems():
+      #if self._read_func: value = self._read_func(value)
+      #rval[ value ] = int(count)
+    #return rval
 
   def _condense(self, data):
     '''
@@ -232,4 +283,8 @@ class Timeseries(object):
     object/value which will be mapped back to a timestamp that covers all
     of the data.
     '''
-    raise NotImplementedError()
+    # raise NotImplementedError()
+    # series type
+    if data:
+      return reduce(operator.add, data.values())
+    return []

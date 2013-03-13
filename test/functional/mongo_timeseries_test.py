@@ -46,3 +46,34 @@ class MongoSeriesTest(Chai):
     self.series.delete('test')
     assert_equals( 0, self.series._client['minute'].count() )
     assert_equals( 0, self.series._client['hour'].count() )
+
+  def test_get(self):
+    # 2 hours worth of data, value is same asV timestamp
+    for t in xrange(1, 7200):
+      self.series.insert( 'test', t, timestamp=t )
+    
+    # middle of an interval
+    interval = self.series.get( 'test', 'minute', timestamp=100 )
+    assert_equals( [60], interval.keys() )
+    assert_equals( list(range(60,120)), interval[60] )
+
+    # end of an interval
+    interval = self.series.get( 'test', 'minute', timestamp=59 )
+    assert_equals( [0], interval.keys() )
+    assert_equals( list(range(1,60)), interval[0] )
+    
+    # no matching interval, returns no with empty value list
+    interval = self.series.get( 'test', 'minute' )
+    assert_equals( 1, len(interval) )
+    assert_equals( 0, len(interval.values()[0]) )
+    
+    ###
+    ### with resolution, optionally condensed
+    ###
+    interval = self.series.get( 'test', 'hour', timestamp=100 )
+    assert_equals( 60, len(interval) )
+    assert_equals( list(range(60,120)), interval[60] )
+    
+    interval = self.series.get( 'test', 'hour', timestamp=100, condensed=True )
+    assert_equals( 1, len(interval) )
+    assert_equals( list(range(1,3600)), interval[0] )
