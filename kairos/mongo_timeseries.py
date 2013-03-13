@@ -113,10 +113,10 @@ class Timeseries(object):
       # get covered indices.
       if config['coarse']:
         self._client[interval].ensure_index( 
-          [('interval',DESCENDING),('name',ASCENDING)], background=True )
+          [('interval',ASCENDING),('name',ASCENDING)], background=True )
       else:
         self._client[interval].ensure_index( 
-          [('interval',DESCENDING),('resolution',ASCENDING),('name',ASCENDING)],
+          [('interval',ASCENDING),('resolution',ASCENDING),('name',ASCENDING)],
           background=True )
       if expire:
         self._client[interval].ensure_index( 
@@ -213,7 +213,7 @@ class Timeseries(object):
       # TODO: this likely needs some optimization, either to force the query 
       # plan, add a range for the resolution condition, or something along
       # those lines.
-      sort = [('interval', DESCENDING), ('resolution', ASCENDING) ]
+      sort = [('interval', ASCENDING), ('resolution', ASCENDING) ]
       cursor = self._client[interval].find( spec=query, sort=sort )
 
       idx = 0
@@ -227,6 +227,52 @@ class Timeseries(object):
       for k,v in rval.iteritems():
         rval[k] = self._transform(v, transform)
     
+    return rval
+  
+  def series(self, name, interval, steps=None, condensed=False, timestamp=None, transform=None):
+    if not timestamp:
+      timestamp = time.time()
+
+    config = self._intervals.get(interval)
+    if not config:
+      raise UnknownInterval(interval)
+    step = config.get('step', 1)
+    steps = steps if steps else config.get('steps',1)
+    resolution = config.get('resolution',step)
+
+    end_timestamp = timestamp
+    end_bucket = int( end_timestamp / step )
+    start_bucket = end_bucket - steps +1 # +1 because it's inclusive of end
+    rval = OrderedDict()
+
+    query = { 'interval' : {'$gte':start_bucket, '$lte':end_bucket} }
+    sort = [('interval', ASCENDING)]
+    if not config['coarse']:
+      sort.append( ('resolution', ASCENDING) )
+    
+    cursor = self._client[interval].find( spec=query, sort=sort )
+    for record in cursor:
+      i_key = record['interval']*step
+      data = self._process_row( record['value'] )
+      if config['coarse']:
+        rval[ i_key ] = data
+      else:
+        rval.setdefault( i_key, OrderedDict() )
+        rval[ i_key ][ record['resolution']*resolution ] = data
+         
+    # If condensed, collapse each interval into a single value
+    if not config['coarse']:
+      if condensed:
+        for key in rval.iterkeys():
+          data = self._condense( rval[key] )
+          if transform:
+            data = self._transform(data, transform)
+          rval[key] = data
+      elif transform:
+        for interval,resolutions in rval.iteritems():
+          for key in resolutions.iterkeys():
+            resolutions[key] = self._transform(resolutions[key], transform)
+   
     return rval
 
   def _transform(self, data, transform):
