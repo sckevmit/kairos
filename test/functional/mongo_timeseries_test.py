@@ -27,7 +27,22 @@ class MongoSeriesTest(Chai):
           'resolution' : 60,
         }
       } )
-    #self.series.delete('test')
+    self.series.delete('test')
 
   def test_insert(self):
+    assert_equals( 0, self.series._client['minute'].count() )
+    assert_equals( 0, self.series._client['hour'].count() )
     self.series.insert( 'test', 32 )
+    assert_equals( 1, self.series._client['minute'].count() )
+    assert_equals( 1, self.series._client['hour'].count() )
+
+  def test_delete(self):
+    # technically already tested between setup and insert, but here for completeness
+    assert_equals( 0, self.series._client['minute'].count() )
+    assert_equals( 0, self.series._client['hour'].count() )
+    self.series.insert( 'test', 32 )
+    assert_equals( 1, self.series._client['minute'].count() )
+    assert_equals( 1, self.series._client['hour'].count() )
+    self.series.delete('test')
+    assert_equals( 0, self.series._client['minute'].count() )
+    assert_equals( 0, self.series._client['hour'].count() )

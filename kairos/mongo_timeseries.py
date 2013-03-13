@@ -133,18 +133,103 @@ class Timeseries(object):
     if self._write_func:
       value = self._write_func(value)
 
+    # Mongo does not allow mixing atomic modifiers and non-$set sets in the
+    # same update, so the choice is to either run the first upsert on 
+    # {'_id':id} to ensure the record is in place followed by an atomic update
+    # based on the series type, or use $set for all of the keys to be used in
+    # creating the record, which then disallows setting our own _id because
+    # that "can't be updated". So the tradeoffs are:
+    #   * 2 updates for every insert, maybe a local cache of known _ids and the
+    #     associated memory overhead
+    #   * Query by the 2 or 3 key tuple for this interval and the associated
+    #     overhead of that index match vs. the presumably-faster match on _id
+    #   * Yet another index for the would-be _id of i_key or r_key, where each
+    #     index has a notable impact on write performance.
+    # For now, choosing to go with matching on the tuple until performance 
+    # testing can be done. Even then, there may be a variety of factors which
+    # make the results situation-dependent.
     for interval,config in self._intervals.iteritems():
       i_bucket, r_bucket, i_key, r_key = config['calc_keys'](name, timestamp)
 
-      insert = {'value':value, 'name':name, 'interval':i_bucket}
-      # self._insert( insert )
-      if config['coarse']:
-        _id = insert['_id'] = i_key
-      else:
-        _id = insert['_id'] = r_key
+      insert = {'name':name, 'interval':i_bucket}
+      #if config['coarse']:
+        ##_id = insert['_id'] = i_key
+        #pass
+      #else:
+      if not config['coarse']:
+        #_id = insert['_id'] = r_key
         insert['resolution'] = r_bucket
+      query = insert.copy()
 
       if config['expire']:
         insert['expire_from'] = datetime.utcfromtimestamp( timestamp )
 
-      self._client[interval].update( {'_id':_id}, insert, upsert=True )
+      # switch to atomic updates
+      insert = {'$set':insert.copy()}
+      self._insert( insert, value )
+      
+
+      # TODO: use write preference settings if we have them
+      # TODO: turn this into one call if possible. when using atomic operators,
+      # either check_keys
+      self._client[interval].update( query, insert, upsert=True, check_keys=False )
+
+  def delete(self, name):
+    '''
+    Delete time series by name across all intervals. Returns the number of
+    records deleted.
+    '''
+    # TODO: confirm that this does not use the combo index and determine
+    # performance implications.
+    num_deleted = 0
+    for interval,config in self._intervals.iteritems():
+      # TODO: use write preference settings if we have them
+      num_deleted += self._client[interval].remove( {'name':name} )['n']
+    return num_deleted
+  
+  def get(self, name, interval, timestamp=None, condensed=False, transform=None):
+    return None
+
+  def _transform(self, data, transform):
+    '''
+    Transform the data. If the transform is not supported by this series,
+    returns the data unaltered.
+    '''
+    raise NotImplementedError()
+
+  def _insert(self, spec, value):
+    '''
+    Subclasses must implement updating the insert spec with the value given the
+    type of timeseries this is.
+    '''
+    #raise NotImplementedError()
+    # series type
+    #spec['$push'] = {'value':value}
+    # count type
+    #spec['$inc'] = {'value':value}
+    # histogram type
+    spec['$inc'] = {'value.%s'%(value): 1}
+    # gauge type
+    #spec['$set']['value'] = value
+    
+  def _get(self, handle, key):
+    '''
+    Subclasses must implement fetching from a key. Should return the result
+    of the call event if handle is a pipeline.
+    '''
+    raise NotImplementedError()
+
+  def _process_row(self, data):
+    '''
+    Subclasses should apply any read function to the data. Will only be called
+    if there is one.
+    '''
+    raise NotImplementedError()
+
+  def _condense(self, data):
+    '''
+    Condense a mapping of timestamps and associated data into a single 
+    object/value which will be mapped back to a timestamp that covers all
+    of the data.
+    '''
+    raise NotImplementedError()
